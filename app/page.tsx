@@ -6,6 +6,7 @@ import SpreadCard from '@/components/SpreadCard';
 import Header from '@/components/Header';
 import SummaryBar from '@/components/SummaryBar';
 import ConversionInfo from '@/components/ConversionInfo';
+import SpreadChart from '@/components/SpreadChart';
 
 const REFRESH_INTERVAL = 30 * 1000; // 30 seconds
 
@@ -125,6 +126,9 @@ export default function Home() {
             ))}
           </div>
         )}
+
+        {/* Historical spread chart */}
+        <SpreadChart />
 
         {/* Conversion info */}
         <ConversionInfo />
