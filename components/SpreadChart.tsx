@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import {
   ResponsiveContainer,
   LineChart,
@@ -14,16 +14,18 @@ import {
   Legend,
 } from 'recharts';
 import { SpreadHistoryPoint } from '@/lib/history-fetchers';
+import { SpreadData } from '@/lib/types';
+import { saveSpreadToHistory, loadHistoryFromStorage } from '@/lib/spread-history-store';
 
 type Range = '1w' | '1m' | '3m' | '6m' | '1y';
 type Commodity = 'gold' | 'silver' | 'crude';
 
-const RANGE_LABELS: { key: Range; label: string }[] = [
-  { key: '1w', label: '7天' },
-  { key: '1m', label: '1月' },
-  { key: '3m', label: '3月' },
-  { key: '6m', label: '6月' },
-  { key: '1y', label: '1年' },
+const RANGE_LABELS: { key: Range; label: string; days: number }[] = [
+  { key: '1w', label: '7天', days: 7 },
+  { key: '1m', label: '1月', days: 30 },
+  { key: '3m', label: '3月', days: 90 },
+  { key: '6m', label: '6月', days: 180 },
+  { key: '1y', label: '1年', days: 365 },
 ];
 
 const COMMODITY_LABELS: { key: Commodity; label: string; icon: string; unit: string }[] = [
@@ -33,10 +35,9 @@ const COMMODITY_LABELS: { key: Commodity; label: string; icon: string; unit: str
 ];
 
 function formatDate(dateStr: string, range: Range) {
-  const d = new Date(dateStr);
-  if (range === '1w') return `${d.getMonth() + 1}/${d.getDate()}`;
-  if (range === '1m') return `${d.getMonth() + 1}/${d.getDate()}`;
-  return `${d.getFullYear().toString().slice(2)}/${d.getMonth() + 1}/${d.getDate()}`;
+  const d = new Date(dateStr + 'T00:00:00');
+  if (range === '1w' || range === '1m') return `${d.getMonth() + 1}/${d.getDate()}`;
+  return `${String(d.getFullYear()).slice(2)}/${d.getMonth() + 1}/${d.getDate()}`;
 }
 
 function fmt(v: number, decimals = 2) {
@@ -46,9 +47,8 @@ function fmt(v: number, decimals = 2) {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function CustomTooltip({ active, payload, label, unit }: any) {
   if (!active || !payload?.length) return null;
-  const d = payload[0]?.payload as SpreadHistoryPoint;
+  const d = payload[0]?.payload as SpreadHistoryPoint & { label: string };
   if (!d) return null;
-
   const isPositive = d.spread >= 0;
   return (
     <div className="bg-gray-900 border border-gray-700 rounded-xl p-3 text-xs shadow-xl min-w-[180px]">
@@ -74,54 +74,81 @@ function CustomTooltip({ active, payload, label, unit }: any) {
   );
 }
 
-export default function SpreadChart() {
+interface Props {
+  /** Live spread readings passed from page.tsx — saved to localStorage for history */
+  liveData?: SpreadData[];
+}
+
+export default function SpreadChart({ liveData }: Props) {
   const [commodity, setCommodity] = useState<Commodity>('gold');
   const [range, setRange] = useState<Range>('1m');
   const [data, setData] = useState<SpreadHistoryPoint[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [serverLoading, setServerLoading] = useState(false);
+  const savedRef = useRef(false);
 
-  const fetchData = useCallback(async (c: Commodity, r: Range) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`/api/history?commodity=${c}&range=${r}`);
-      const json = await res.json();
-      if (json.success && json.data.length > 0) {
-        setData(json.data);
-      } else if (json.data.length === 0) {
-        setData([]);
-        setError('暂无历史数据');
-      } else {
-        setError(json.error ?? '数据获取失败');
+  // --- Persist live spread readings to localStorage ---
+  useEffect(() => {
+    if (!liveData || liveData.length === 0) return;
+    saveSpreadToHistory(liveData);
+    savedRef.current = true;
+  }, [liveData]);
+
+  // --- Merge server data + localStorage data ---
+  const loadData = useCallback(
+    async (c: Commodity, r: Range) => {
+      const rangeDef = RANGE_LABELS.find((x) => x.key === r)!;
+
+      // 1. Load from localStorage immediately (no flash)
+      const localData = loadHistoryFromStorage(c, rangeDef.days);
+      if (localData.length > 0) setData(localData);
+
+      // 2. Try server-side API (works when deployed in CN or with proxy)
+      setServerLoading(true);
+      try {
+        const res = await fetch(`/api/history?commodity=${c}&range=${r}`);
+        const json = await res.json();
+        if (json.success && Array.isArray(json.data) && json.data.length > 0) {
+          // Merge: server data takes precedence for its dates; local fills the rest
+          const merged = new Map<string, SpreadHistoryPoint>(
+            localData.map((p) => [p.date, p])
+          );
+          for (const p of json.data as SpreadHistoryPoint[]) {
+            merged.set(p.date, p);
+          }
+          const sorted = [...merged.values()].sort((a, b) =>
+            a.date.localeCompare(b.date)
+          );
+          setData(sorted);
+        }
+      } catch {
+        // server unavailable — localStorage data already shown
+      } finally {
+        setServerLoading(false);
       }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
-    fetchData(commodity, range);
-  }, [fetchData, commodity, range]);
+    loadData(commodity, range);
+  }, [loadData, commodity, range, liveData]); // re-run when new live data arrives
 
   const currentCommodity = COMMODITY_LABELS.find((c) => c.key === commodity)!;
+  const rangeDef = RANGE_LABELS.find((r) => r.key === range)!;
 
-  // Chart data with formatted labels
   const chartData = data.map((d) => ({
     ...d,
     label: formatDate(d.date, range),
   }));
 
-  // Y-axis domain with 20% padding
   const spreads = data.map((d) => d.spread);
-  const minSpread = Math.min(...spreads, 0);
-  const maxSpread = Math.max(...spreads, 0);
-  const pad = (maxSpread - minSpread) * 0.2 || Math.abs(maxSpread) * 0.2 || 1;
+  const minSpread = spreads.length ? Math.min(...spreads, 0) : -1;
+  const maxSpread = spreads.length ? Math.max(...spreads, 0) : 1;
+  const pad = ((maxSpread - minSpread) * 0.2) || Math.abs(maxSpread) * 0.2 || 1;
   const yDomain = [+(minSpread - pad).toFixed(2), +(maxSpread + pad).toFixed(2)];
 
   const lastPoint = data[data.length - 1];
+  const isBuilding = data.length > 0 && data.length < 5;
 
   return (
     <div className="bg-gray-800/60 border border-gray-700/50 rounded-2xl p-5 mt-6">
@@ -134,7 +161,6 @@ export default function SpreadChart() {
             国际价 − 国内换算价
           </p>
         </div>
-
         {/* Commodity tabs */}
         <div className="flex gap-1 bg-gray-900/60 rounded-lg p-1 self-start">
           {COMMODITY_LABELS.map((c) => (
@@ -171,12 +197,24 @@ export default function SpreadChart() {
       </div>
 
       {/* Stats row */}
-      {data.length > 0 && !loading && (
+      {data.length > 0 && (
         <div className="flex flex-wrap gap-4 mb-4 text-xs">
           {[
-            { label: '最新价差', value: lastPoint ? (lastPoint.spread >= 0 ? '+' : '') + fmt(lastPoint.spread) : '-', color: lastPoint?.spread >= 0 ? 'text-green-400' : 'text-red-400' },
-            { label: '期间最高', value: '+' + fmt(Math.max(...spreads)), color: 'text-green-400' },
-            { label: '期间最低', value: fmt(Math.min(...spreads)), color: Math.min(...spreads) < 0 ? 'text-red-400' : 'text-green-400' },
+            {
+              label: '最新价差',
+              value: lastPoint ? (lastPoint.spread >= 0 ? '+' : '') + fmt(lastPoint.spread) : '-',
+              color: (lastPoint?.spread ?? 0) >= 0 ? 'text-green-400' : 'text-red-400',
+            },
+            {
+              label: '期间最高',
+              value: '+' + fmt(Math.max(...spreads)),
+              color: 'text-green-400',
+            },
+            {
+              label: '期间最低',
+              value: fmt(Math.min(...spreads)),
+              color: Math.min(...spreads) < 0 ? 'text-red-400' : 'text-green-400',
+            },
             { label: '数据点', value: `${data.length}天`, color: 'text-gray-400' },
           ].map((s) => (
             <div key={s.label} className="flex flex-col">
@@ -188,9 +226,9 @@ export default function SpreadChart() {
       )}
 
       {/* Chart area */}
-      <div className="relative">
-        {loading && (
-          <div className="absolute inset-0 flex items-center justify-center bg-gray-900/50 rounded-xl z-10">
+      <div className="relative min-h-[200px]">
+        {serverLoading && data.length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center z-10">
             <div className="flex items-center gap-2 text-gray-400 text-sm">
               <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
                 <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
@@ -201,15 +239,19 @@ export default function SpreadChart() {
           </div>
         )}
 
-        {error && !loading && (
-          <div className="flex items-center justify-center h-40 text-gray-500 text-sm">
-            {error}
+        {!serverLoading && data.length === 0 && (
+          <div className="flex flex-col items-center justify-center h-48 text-center gap-2">
+            <p className="text-gray-400 text-sm font-medium">暂无 {rangeDef.label} 历史数据</p>
+            <p className="text-gray-600 text-xs max-w-xs">
+              历史价差将随每次页面刷新自动累积到本地。每 30 秒记录一次，
+              数据将持续保存在浏览器中。
+            </p>
           </div>
         )}
 
-        {!error && !loading && data.length === 0 && (
-          <div className="flex items-center justify-center h-40 text-gray-500 text-sm">
-            暂无数据
+        {isBuilding && (
+          <div className="mb-3 px-3 py-2 bg-blue-900/30 border border-blue-700/30 rounded-lg text-xs text-blue-300">
+            数据积累中（{data.length} 天）· 页面保持开启可持续累积历史记录
           </div>
         )}
 
@@ -242,36 +284,50 @@ export default function SpreadChart() {
                   value === 'spread' ? '价差 (国际−国内换算)' : value
                 }
               />
-              <ReferenceLine y={0} stroke="#6b7280" strokeDasharray="4 2" strokeWidth={1} />
+              <ReferenceLine
+                y={0}
+                stroke="#6b7280"
+                strokeDasharray="4 2"
+                strokeWidth={1}
+              />
               <Line
                 type="monotone"
                 dataKey="spread"
                 stroke="#60a5fa"
                 strokeWidth={2}
-                dot={false}
+                dot={data.length <= 30 ? { r: 3, fill: '#60a5fa' } : false}
                 activeDot={{ r: 4, fill: '#60a5fa' }}
                 isAnimationActive={false}
               />
-              {/* Brush for drag-to-zoom */}
-              <Brush
-                dataKey="label"
-                height={24}
-                stroke="#374151"
-                fill="#1f2937"
-                travellerWidth={8}
-                startIndex={Math.max(0, chartData.length - Math.min(chartData.length, 60))}
-              >
-                <LineChart>
-                  <Line type="monotone" dataKey="spread" stroke="#3b82f6" dot={false} strokeWidth={1} />
-                </LineChart>
-              </Brush>
+              {data.length > 3 && (
+                <Brush
+                  dataKey="label"
+                  height={24}
+                  stroke="#374151"
+                  fill="#1f2937"
+                  travellerWidth={8}
+                  startIndex={Math.max(0, chartData.length - Math.min(chartData.length, 60))}
+                >
+                  <LineChart>
+                    <Line
+                      type="monotone"
+                      dataKey="spread"
+                      stroke="#3b82f6"
+                      dot={false}
+                      strokeWidth={1}
+                      isAnimationActive={false}
+                    />
+                  </LineChart>
+                </Brush>
+              )}
             </LineChart>
           </ResponsiveContainer>
         )}
       </div>
 
       <p className="text-xs text-gray-600 mt-3">
-        数据来源: 东方财富(国内历史K线) · Yahoo Finance(国际期货 + 汇率) · 可拖动底部滑块缩放
+        数据存储于浏览器本地 · 可拖动底部滑块缩放时间范围
+        {serverLoading && <span className="text-gray-700 ml-2">正在尝试加载服务端历史...</span>}
       </p>
     </div>
   );

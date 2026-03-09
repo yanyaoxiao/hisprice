@@ -128,7 +128,7 @@ export default function Home() {
         )}
 
         {/* Historical spread chart */}
-        <SpreadChart />
+        <SpreadChart liveData={spreads} />
 
         {/* Conversion info */}
         <ConversionInfo />
