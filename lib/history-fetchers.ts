@@ -27,56 +27,35 @@ const RANGE_DAYS: Record<Range, number> = {
   '1w': 8, '1m': 35, '3m': 95, '6m': 185, '1y': 370,
 };
 
-// ─── Contract code helpers ────────────────────────────────────────────────────
+// ─── Contract code generator ─────────────────────────────────────────────────
 
 /**
- * Parse a contract code like "AU2606" into { base:"AU", yy:26, mm:6 }
+ * Generate contract codes covering the past `lookbackMonths` from now.
+ * AU/AG: even months only (2,4,6,8,10,12).
+ * SC: all months.
+ * Returns codes from most-recent to oldest.
  */
-function parseContract(code: string) {
-  const base = code.match(/^[A-Za-z]+/)?.[0].toUpperCase() ?? '';
-  const digits = code.slice(base.length);
-  return { base, yy: parseInt(digits.slice(0, 2)), mm: parseInt(digits.slice(2)) };
-}
+function generateContractCodes(base: string, lookbackMonths: number): string[] {
+  const isEvenOnly = base === 'AU' || base === 'AG';
+  const step = isEvenOnly ? 2 : 1;
+  const totalSteps = Math.ceil(lookbackMonths / step) + 3; // buffer
 
-/**
- * Generate a list of contract codes going backwards from the given code.
- * Gold/Silver: even months (2,4,6,8,10,12)
- * Crude (SC): all months
- */
-function previousContracts(currentCode: string, count: number): string[] {
-  const { base, yy, mm } = parseContract(currentCode);
-  const isEven = base === 'AU' || base === 'AG';
-  const step = isEven ? 2 : 1;
+  const now = new Date();
+  let y = now.getFullYear() % 100; // 2-digit year
+  let m = now.getMonth() + 1;      // 1-12
+
+  // Round up to the next valid contract month (e.g., March → April for AU)
+  if (isEvenOnly && m % 2 !== 0) m += 1;
+  if (m > 12) { m -= 12; y += 1; }
 
   const codes: string[] = [];
-  let y = yy, m = mm;
-  for (let i = 0; i < count; i++) {
-    m -= step;
-    if (m <= 0) { m += 12; y -= 1; }
-    const code = `${base}${String(y).padStart(2, '0')}${String(m).padStart(2, '0')}`;
-    codes.push(code);
+  let cy = y, cm = m;
+  for (let i = 0; i < totalSteps; i++) {
+    codes.push(`${base}${String(cy).padStart(2, '0')}${String(cm).padStart(2, '0')}`);
+    cm -= step;
+    if (cm <= 0) { cm += 12; cy -= 1; }
   }
   return codes;
-}
-
-// ─── Sina Finance: get active contract code ────────────────────────────────────
-
-/**
- * Calls Sina Finance to get the current main contract code (e.g., "AU2606")
- */
-async function getActiveContract(sinaCode: string): Promise<string | null> {
-  try {
-    const res = await fetch(`https://hq.sinajs.cn/list=${sinaCode}`, {
-      headers: { 'User-Agent': UA, Referer: 'https://finance.sina.com.cn/' },
-      next: { revalidate: 0 },
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    const match = text.match(/hq_str_[^=]+="([^,]+)/);
-    return match ? match[1].toUpperCase() : null;
-  } catch {
-    return null;
-  }
 }
 
 // ─── Eastmoney: fetch historical klines ───────────────────────────────────────
@@ -89,37 +68,46 @@ async function fetchEastmoneyKlines(secId: string, begDate: string): Promise<Kli
     `?secid=${secId}&fields1=f1,f2,f3,f4,f5,f6&fields2=f51,f52,f53,f54,f55,f56,f57,f58` +
     `&klt=101&fqt=1&beg=${begDate}&end=20500101&lmt=500` +
     `&ut=fa5fd1943c7b386f172d6893dbfba10b`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': UA, Referer: 'https://quote.eastmoney.com/' },
-    next: { revalidate: 0 },
-  });
-  if (!res.ok) return [];
-  const json = await res.json();
-  const klines: string[] = json?.data?.klines ?? [];
-  return klines
-    .map((k) => {
-      const fields = k.split(',');
-      return { date: fields[0], close: parseFloat(fields[2]) || 0 };
-    })
-    .filter((k) => k.close > 0);
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': UA, Referer: 'https://quote.eastmoney.com/' },
+      next: { revalidate: 0 },
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const klines: string[] = json?.data?.klines ?? [];
+    return klines
+      .map((k) => {
+        const fields = k.split(',');
+        return { date: fields[0], close: parseFloat(fields[2]) || 0 };
+      })
+      .filter((k) => k.close > 0);
+  } catch {
+    return [];
+  }
 }
 
-/** Fetch multiple contracts and merge, sorted by date ascending */
+/** Fetch multiple contracts and merge by date (most-recent contract wins). */
 async function fetchChinaHistory(
-  market: string,        // "113" for SHFE, "142" for INE
-  currentCode: string,   // e.g. "AU2606"
-  begDate: string,
+  market: string,       // "113" for SHFE, "142" for INE
+  base: string,         // "AU", "AG", "SC"
+  range: Range,
 ): Promise<Kline[]> {
-  // Try current + up to 3 previous contracts to cover longer ranges
-  const codes = [currentCode, ...previousContracts(currentCode, 3)];
-  const all = await Promise.allSettled(
+  const lookbackMonths = Math.ceil(RANGE_DAYS[range] / 30) + 2;
+  const codes = generateContractCodes(base, lookbackMonths);
+  const begDate = daysAgo(RANGE_DAYS[range]);
+
+  const results = await Promise.allSettled(
     codes.map((c) => fetchEastmoneyKlines(`${market}.${c}`, begDate))
   );
 
+  // Merge by date; if two contracts have the same date, prefer the more-recent contract
+  // (codes are ordered from most-recent to oldest, so iterate in order)
   const dateMap = new Map<string, number>();
-  for (const r of all) {
+  for (const r of results) {
     if (r.status !== 'fulfilled') continue;
     for (const k of r.value) {
+      // Only fill in a date if we haven't seen it yet (most-recent contract takes priority)
       if (!dateMap.has(k.date)) dateMap.set(k.date, k.close);
     }
   }
@@ -135,53 +123,57 @@ async function fetchYahooHistory(symbol: string, range: string): Promise<Kline[]
   const url =
     `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}` +
     `?interval=1d&range=${range}`;
-  const res = await fetch(url, {
-    headers: { 'User-Agent': UA },
-    next: { revalidate: 0 },
-  });
-  if (!res.ok) return [];
-  const json = await res.json();
-  const result = json?.chart?.result?.[0];
-  if (!result) return [];
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': UA },
+      next: { revalidate: 0 },
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    const result = json?.chart?.result?.[0];
+    if (!result) return [];
 
-  const timestamps: number[] = result.timestamp ?? [];
-  const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
+    const timestamps: number[] = result.timestamp ?? [];
+    const closes: (number | null)[] = result.indicators?.quote?.[0]?.close ?? [];
 
-  return timestamps
-    .map((ts, i) => ({
-      date: new Date(ts * 1000).toISOString().slice(0, 10),
-      close: closes[i] ?? 0,
-    }))
-    .filter((k) => k.close > 0);
+    return timestamps
+      .map((ts, i) => ({
+        date: new Date(ts * 1000).toISOString().slice(0, 10),
+        close: closes[i] ?? 0,
+      }))
+      .filter((k) => k.close > 0);
+  } catch {
+    return [];
+  }
 }
 
 // ─── Commodity configs ─────────────────────────────────────────────────────────
 
 interface CommodityConfig {
-  sinaCode: string;
-  market: string;
+  base: string;    // Eastmoney contract base, e.g. "AU"
+  market: string;  // Eastmoney market id
   yahooSymbol: string;
-  /** Convert China daily close (in CNY per native unit) → same unit as Yahoo (USD) */
+  /** Convert China daily close (CNY/native unit) → same unit as Yahoo (USD) */
   convert: (chinaClose: number, usdCny: number) => number;
 }
 
 const CONFIGS: Record<string, CommodityConfig> = {
   gold: {
-    sinaCode: 'nf_AU0',
+    base: 'AU',
     market: '113',
     yahooSymbol: 'GC=F',
     // AU: CNY/g  →  USD/troy oz
     convert: (p, r) => (p * 31.1035) / r,
   },
   silver: {
-    sinaCode: 'nf_AG0',
+    base: 'AG',
     market: '113',
     yahooSymbol: 'SI=F',
     // AG: CNY/kg  →  USD/troy oz
     convert: (p, r) => p / r / (1000 / 31.1035),
   },
   crude: {
-    sinaCode: 'nf_SC0',
+    base: 'SC',
     market: '142',
     yahooSymbol: 'CL=F',
     // SC: CNY/barrel  →  USD/barrel
@@ -199,15 +191,10 @@ export async function fetchHistoricalSpread(
   if (!cfg) return [];
 
   const yahooRange = YAHOO_RANGE[range];
-  const begDate = daysAgo(RANGE_DAYS[range]);
-
-  // Resolve active China contract code
-  const activeCode = await getActiveContract(cfg.sinaCode);
-  if (!activeCode) return [];
 
   // Fetch all three data series in parallel
   const [chinaKlines, intlKlines, rateKlines] = await Promise.all([
-    fetchChinaHistory(cfg.market, activeCode, begDate),
+    fetchChinaHistory(cfg.market, cfg.base, range),
     fetchYahooHistory(cfg.yahooSymbol, yahooRange),
     fetchYahooHistory('USDCNY=X', yahooRange),
   ]);
@@ -217,9 +204,11 @@ export async function fetchHistoricalSpread(
   const intlMap = new Map(intlKlines.map((k) => [k.date, k.close]));
   const rateMap = new Map(rateKlines.map((k) => [k.date, k.close]));
 
-  // Fill missing exchange rates by carrying forward the last known value
-  let lastRate = 7.25;
+  // Union of all dates, sorted
   const allDates = [...new Set([...chinaMap.keys(), ...intlMap.keys()])].sort();
+
+  // Forward-fill exchange rate for non-trading days
+  let lastRate = 7.25;
   const filledRateMap = new Map<string, number>();
   for (const date of allDates) {
     if (rateMap.has(date)) lastRate = rateMap.get(date)!;
