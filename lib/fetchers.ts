@@ -90,9 +90,16 @@ async function fetchSinaFutures(codes: string[]): Promise<Map<string, { price: n
     if (!match) continue;
     const code = match[1];
     const fields = match[2].split(',');
-    if (fields.length < 10 || !fields[5]) continue;
+    if (fields.length < 10) continue;
 
-    const price = parseFloat(fields[5]) || 0;
+    // fields[5]=现价(0 when closed), fields[7]=结算价, fields[6]=前结算价
+    const price =
+      parseFloat(fields[5]) ||
+      parseFloat(fields[7]) ||
+      parseFloat(fields[6]) ||
+      0;
+    if (!price) continue;
+
     const change = parseFloat(fields[8]) || 0;
     // change% field may be like "0.05%" — strip the %
     const changePercentStr = fields[9]?.replace('%', '') ?? '0';
