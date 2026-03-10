@@ -20,14 +20,7 @@ export default function SummaryBar({ spreads }: SummaryBarProps) {
             </div>
             <div
               className={`text-lg font-bold ${
-                s.spread > 0 ? 'text-green-400' : s.spread < 0 ? 'text-red-400' : 'text-gray-400'
-              }`}
-            >
-              {s.spread > 0 ? '+' : ''}{s.spread.toFixed(2)}
-            </div>
-            <div
-              className={`text-xs ${
-                s.spreadPercent > 0 ? 'text-green-500' : s.spreadPercent < 0 ? 'text-red-500' : 'text-gray-500'
+                s.spreadPercent > 0 ? 'text-green-400' : s.spreadPercent < 0 ? 'text-red-400' : 'text-gray-400'
               }`}
             >
               {s.spreadPercent > 0 ? '+' : ''}{s.spreadPercent.toFixed(2)}%

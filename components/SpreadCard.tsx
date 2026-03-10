@@ -15,8 +15,8 @@ function PriceChange({ value, percent }: { value: number; percent: number }) {
   );
 }
 
-function SpreadBadge({ spread, percent }: { spread: number; percent: number }) {
-  const isPositive = spread >= 0;
+function SpreadBadge({ percent }: { percent: number }) {
+  const isPositive = percent >= 0;
   const absPercent = Math.abs(percent);
 
   let bgColor = 'bg-gray-700';
@@ -26,9 +26,6 @@ function SpreadBadge({ spread, percent }: { spread: number; percent: number }) {
   return (
     <div className={`rounded-lg px-4 py-2 text-center ${bgColor}`}>
       <div className={`text-2xl font-bold ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
-        {isPositive ? '+' : ''}{spread.toFixed(2)}
-      </div>
-      <div className={`text-sm mt-0.5 ${isPositive ? 'text-green-500' : 'text-red-500'}`}>
         {isPositive ? '+' : ''}{percent.toFixed(2)}%
       </div>
     </div>
@@ -51,8 +48,8 @@ export default function SpreadCard({ spread }: SpreadCardProps) {
           </div>
         </div>
         <div className="text-right">
-          <div className="text-xs text-gray-500 mb-1">价差 ({spread.displayUnit})</div>
-          <SpreadBadge spread={spread.spread} percent={spread.spreadPercent} />
+          <div className="text-xs text-gray-500 mb-1">价差</div>
+          <SpreadBadge percent={spread.spreadPercent} />
         </div>
       </div>
 

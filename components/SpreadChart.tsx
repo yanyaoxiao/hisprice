@@ -45,16 +45,16 @@ function fmt(v: number, decimals = 2) {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function CustomTooltip({ active, payload, label, unit }: any) {
+function CustomTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null;
-  const d = payload[0]?.payload as SpreadHistoryPoint & { label: string };
+  const d = payload[0]?.payload as SpreadHistoryPoint & { label: string; spreadPct: number };
   if (!d) return null;
-  const isPositive = d.spread >= 0;
+  const isPositive = d.spreadPct >= 0;
   return (
     <div className="bg-gray-900 border border-gray-700 rounded-xl p-3 text-xs shadow-xl min-w-[180px]">
       <p className="text-gray-400 mb-2 font-medium">{label}</p>
       <div className={`font-bold text-sm mb-1 ${isPositive ? 'text-green-400' : 'text-red-400'}`}>
-        价差: {isPositive ? '+' : ''}{fmt(d.spread)} {unit}
+        价差: {isPositive ? '+' : ''}{fmt(d.spreadPct)}%
       </div>
       <div className="space-y-0.5 text-gray-300">
         <div className="flex justify-between gap-4">
@@ -136,16 +136,18 @@ export default function SpreadChart({ liveData }: Props) {
   const currentCommodity = COMMODITY_LABELS.find((c) => c.key === commodity)!;
   const rangeDef = RANGE_LABELS.find((r) => r.key === range)!;
 
+  // spreadPct = intlPrice / chinaPrice - 1 (percentage, 2dp)
   const chartData = data.map((d) => ({
     ...d,
+    spreadPct: d.chinaPrice > 0 ? +((d.intlPrice / d.chinaPrice - 1) * 100).toFixed(2) : 0,
     label: formatDate(d.date, range),
   }));
 
-  const spreads = data.map((d) => d.spread);
-  const minSpread = spreads.length ? Math.min(...spreads, 0) : -1;
-  const maxSpread = spreads.length ? Math.max(...spreads, 0) : 1;
-  const pad = ((maxSpread - minSpread) * 0.2) || Math.abs(maxSpread) * 0.2 || 1;
-  const yDomain = [+(minSpread - pad).toFixed(2), +(maxSpread + pad).toFixed(2)];
+  const pcts = chartData.map((d) => d.spreadPct);
+  const minPct = pcts.length ? Math.min(...pcts, 0) : -1;
+  const maxPct = pcts.length ? Math.max(...pcts, 0) : 1;
+  const pad = ((maxPct - minPct) * 0.2) || Math.abs(maxPct) * 0.2 || 0.5;
+  const yDomain = [+(minPct - pad).toFixed(2), +(maxPct + pad).toFixed(2)];
 
   const lastPoint = data[data.length - 1];
   const isBuilding = data.length > 0 && data.length < 5;
@@ -157,8 +159,7 @@ export default function SpreadChart({ liveData }: Props) {
         <div>
           <h3 className="text-base font-bold text-white">历史价差走势</h3>
           <p className="text-xs text-gray-500 mt-0.5">
-            {currentCommodity.icon} {currentCommodity.label} · 单位: {currentCommodity.unit} ·
-            国际价 − 国内换算价
+            {currentCommodity.icon} {currentCommodity.label} · 国际价/国内换算价−1（%）
           </p>
         </div>
         {/* Commodity tabs */}
@@ -202,18 +203,18 @@ export default function SpreadChart({ liveData }: Props) {
           {[
             {
               label: '最新价差',
-              value: lastPoint ? (lastPoint.spread >= 0 ? '+' : '') + fmt(lastPoint.spread) : '-',
-              color: (lastPoint?.spread ?? 0) >= 0 ? 'text-green-400' : 'text-red-400',
+              value: pcts.length ? (pcts[pcts.length - 1] >= 0 ? '+' : '') + fmt(pcts[pcts.length - 1]) + '%' : '-',
+              color: (pcts[pcts.length - 1] ?? 0) >= 0 ? 'text-green-400' : 'text-red-400',
             },
             {
               label: '期间最高',
-              value: '+' + fmt(Math.max(...spreads)),
+              value: '+' + fmt(Math.max(...pcts)) + '%',
               color: 'text-green-400',
             },
             {
               label: '期间最低',
-              value: fmt(Math.min(...spreads)),
-              color: Math.min(...spreads) < 0 ? 'text-red-400' : 'text-green-400',
+              value: fmt(Math.min(...pcts)) + '%',
+              color: Math.min(...pcts) < 0 ? 'text-red-400' : 'text-green-400',
             },
             { label: '数据点', value: `${data.length}天`, color: 'text-gray-400' },
           ].map((s) => (
@@ -271,17 +272,17 @@ export default function SpreadChart({ liveData }: Props) {
                 tick={{ fill: '#6b7280', fontSize: 11 }}
                 axisLine={false}
                 tickLine={false}
-                tickFormatter={(v) => v.toFixed(1)}
-                width={52}
+                tickFormatter={(v) => v.toFixed(2) + '%'}
+                width={58}
               />
               <Tooltip
-                content={<CustomTooltip unit={currentCommodity.unit} />}
+                content={<CustomTooltip />}
                 cursor={{ stroke: '#4b5563', strokeWidth: 1 }}
               />
               <Legend
                 wrapperStyle={{ fontSize: 11, color: '#9ca3af', paddingTop: 8 }}
                 formatter={(value) =>
-                  value === 'spread' ? '价差 (国际−国内换算)' : value
+                  value === 'spreadPct' ? '价差 % (国际/国内换算−1)' : value
                 }
               />
               <ReferenceLine
@@ -292,7 +293,7 @@ export default function SpreadChart({ liveData }: Props) {
               />
               <Line
                 type="monotone"
-                dataKey="spread"
+                dataKey="spreadPct"
                 stroke="#60a5fa"
                 strokeWidth={2}
                 dot={data.length <= 30 ? { r: 3, fill: '#60a5fa' } : false}
@@ -311,7 +312,7 @@ export default function SpreadChart({ liveData }: Props) {
                   <LineChart>
                     <Line
                       type="monotone"
-                      dataKey="spread"
+                      dataKey="spreadPct"
                       stroke="#3b82f6"
                       dot={false}
                       strokeWidth={1}
